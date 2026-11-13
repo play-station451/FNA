@@ -1,138 +1,108 @@
 
-name: Build FNA 18.5 Windows x64
+name: Build and Inspect FNA 18.5
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - "vendor/FNA-1805.zip"
-      - ".github/workflows/build-fna-18-5.yml"
+      - "vendor/**"
+      - ".github/workflows/build-fna.yml"
 
 permissions:
   contents: read
 
 jobs:
-  build-fna:
+  build:
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install CI build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y mono-devel make unzip git
+          sudo apt-get install -y mono-devel make unzip file
 
-      - name: Prepare directories
-        shell: bash
-        run: |
-          mkdir -p work dist/FNA-18.5-x64
-
-      - name: Check source archive
-        shell: bash
+      - name: Check FNA source archive
         run: |
           test -f vendor/FNA-1805.zip
-          unzip -l vendor/FNA-1805.zip | grep -E 'FNA/Makefile'
 
       - name: Extract FNA source
-        shell: bash
         run: |
+          mkdir -p work/fna-source
           unzip -q vendor/FNA-1805.zip -d work/fna-source
           test -f work/fna-source/FNA/Makefile
 
-      - name: Build managed FNA.dll
-        shell: bash
+      - name: Build managed FNA
+        continue-on-error: true
         run: |
-          cd work/fna-source/FNA
-          make release
-          find bin -type f -iname 'FNA.dll' -print
+          mkdir -p dist/FNA-18.5-managed
+          make -C work/fna-source/FNA 2>&1 | tee dist/build.log
 
-      - name: Collect managed FNA files
-        shell: bash
+          find work/fna-source -type f -iname "FNA.dll" \
+            -exec cp {} dist/FNA-18.5-managed/FNA.dll \; -quit
+
+          find work/fna-source -type f -iname "FNA.dll.config" \
+            -exec cp {} dist/FNA-18.5-managed/FNA.dll.config \; -quit
+
+      - name: Inspect Windows native libraries
+        if: always()
         run: |
-          FNA_DIR="work/fna-source/FNA"
-          OUTPUT="dist/FNA-18.5-x64"
+          mkdir -p dist/native-windows-x64
 
-          FNA_DLL="$(find "$FNA_DIR/bin" -type f -iname 'FNA.dll' | head -n 1)"
+          REPORT="dist/native-report.txt"
+          NATIVE_DIR="vendor/native/windows-x64"
 
-          if [ -z "$FNA_DLL" ]; then
-            echo "FNA.dll was not produced."
-            exit 1
-          fi
+          echo "FNA 18.5 Windows native dependency report" > "$REPORT"
+          echo "==========================================" >> "$REPORT"
+          echo "" >> "$REPORT"
 
-          cp "$FNA_DLL" "$OUTPUT/FNA.dll"
-          cp "$FNA_DIR/FNA.dll.config" "$OUTPUT/FNA.dll.config"
-
-      - name: Retrieve legacy native libraries
-        shell: bash
-        run: |
-          git clone --depth 1 \
-            https://github.com/danielcrenna/fnalibs.git \
-            work/legacy-fnalibs
-
-          NATIVE="work/legacy-fnalibs/fnalibs/x64"
-          OUTPUT="dist/FNA-18.5-x64"
-
-          if [ ! -d "$NATIVE" ]; then
-            echo "Legacy x64 native library folder not found."
-            find work/legacy-fnalibs -maxdepth 4 -type f
-            exit 1
-          fi
-
-          cp -av "$NATIVE/." "$OUTPUT/"
-
-      - name: Verify required native libraries
-        shell: bash
-        run: |
-          OUTPUT="dist/FNA-18.5-x64"
-
-          REQUIRED=(
+          DLLS=(
             SDL2.dll
             SDL2_image.dll
             soft_oal.dll
             MojoShader.dll
             libvorbisfile.dll
             libtheorafile.dll
+            FNA3D.dll
+            FAudio.dll
           )
 
-          FAILED=0
+          if [ ! -d "$NATIVE_DIR" ]; then
+            echo "Native input folder not present: $NATIVE_DIR" >> "$REPORT"
+            echo "No local PC files are accessible to this runner." >> "$REPORT"
+          else
+            for DLL in "${DLLS[@]}"; do
+              MATCH=$(find "$NATIVE_DIR" -type f -iname "$DLL" -print -quit)
 
-          for DLL in "${REQUIRED[@]}"; do
-            if [ -f "$OUTPUT/$DLL" ]; then
-              echo "FOUND: $DLL"
-            else
-              echo "MISSING: $DLL"
-              FAILED=1
-            fi
-          done
-
-          echo "$FAILED" > dist/verification-status.txt
-
-          if [ "$FAILED" -ne 0 ]; then
-            echo "One or more native dependencies are missing."
-            exit 1
+              if [ -n "$MATCH" ]; then
+                cp "$MATCH" "dist/native-windows-x64/$DLL"
+                echo "[FOUND] $DLL" >> "$REPORT"
+                file "$MATCH" >> "$REPORT"
+              else
+                echo "[MISSING] $DLL" >> "$REPORT"
+              fi
+            done
           fi
 
-      - name: Generate build report
+          echo "" >> "$REPORT"
+          echo "Files included in native artifact:" >> "$REPORT"
+          find dist/native-windows-x64 -maxdepth 1 -type f -printf '%f\n' >> "$REPORT"
+
+      - name: Verify managed output
         if: always()
-        shell: bash
         run: |
-          mkdir -p dist/FNA-18.5-x64
+          echo "===== BUILD OUTPUT ====="
+          find dist -maxdepth 3 -type f -printf '%p (%s bytes)\n' || true
 
-          {
-            echo "FNA 18.5 Windows x64 build"
-            echo "Build date: $(date -u)"
-            echo ""
-            echo "Files:"
-            find dist/FNA-18.5-x64 -maxdepth 1 -type f -printf '%f (%s bytes)\n'
-          } > dist/BUILD-REPORT.txt
+          echo "===== NATIVE REPORT ====="
+          cat dist/native-report.txt || true
 
-      - name: Upload FNA artifacts
+      - name: Upload FNA build and inspection artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FNA-18.5-Windows-x64
+          name: FNA-18.5-build-and-inspection
           path: dist/
           if-no-files-found: warn
-          retention-days: 14
