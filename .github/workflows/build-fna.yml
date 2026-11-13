@@ -1,0 +1,108 @@
+
+name: Build and Inspect FNA 18.5
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "vendor/**"
+      - ".github/workflows/build-fna.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install CI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mono-devel make unzip file
+
+      - name: Check FNA source archive
+        run: |
+          test -f vendor/FNA-1805.zip
+
+      - name: Extract FNA source
+        run: |
+          mkdir -p work/fna-source
+          unzip -q vendor/FNA-1805.zip -d work/fna-source
+          test -f work/fna-source/FNA/Makefile
+
+      - name: Build managed FNA
+        continue-on-error: true
+        run: |
+          mkdir -p dist/FNA-18.5-managed
+          make -C work/fna-source/FNA 2>&1 | tee dist/build.log
+
+          find work/fna-source -type f -iname "FNA.dll" \
+            -exec cp {} dist/FNA-18.5-managed/FNA.dll \; -quit
+
+          find work/fna-source -type f -iname "FNA.dll.config" \
+            -exec cp {} dist/FNA-18.5-managed/FNA.dll.config \; -quit
+
+      - name: Inspect Windows native libraries
+        if: always()
+        run: |
+          mkdir -p dist/native-windows-x64
+
+          REPORT="dist/native-report.txt"
+          NATIVE_DIR="vendor/native/windows-x64"
+
+          echo "FNA 18.5 Windows native dependency report" > "$REPORT"
+          echo "==========================================" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          DLLS=(
+            SDL2.dll
+            SDL2_image.dll
+            soft_oal.dll
+            MojoShader.dll
+            libvorbisfile.dll
+            libtheorafile.dll
+            FNA3D.dll
+            FAudio.dll
+          )
+
+          if [ ! -d "$NATIVE_DIR" ]; then
+            echo "Native input folder not present: $NATIVE_DIR" >> "$REPORT"
+            echo "No local PC files are accessible to this runner." >> "$REPORT"
+          else
+            for DLL in "${DLLS[@]}"; do
+              MATCH=$(find "$NATIVE_DIR" -type f -iname "$DLL" -print -quit)
+
+              if [ -n "$MATCH" ]; then
+                cp "$MATCH" "dist/native-windows-x64/$DLL"
+                echo "[FOUND] $DLL" >> "$REPORT"
+                file "$MATCH" >> "$REPORT"
+              else
+                echo "[MISSING] $DLL" >> "$REPORT"
+              fi
+            done
+          fi
+
+          echo "" >> "$REPORT"
+          echo "Files included in native artifact:" >> "$REPORT"
+          find dist/native-windows-x64 -maxdepth 1 -type f -printf '%f\n' >> "$REPORT"
+
+      - name: Verify managed output
+        if: always()
+        run: |
+          echo "===== BUILD OUTPUT ====="
+          find dist -maxdepth 3 -type f -printf '%p (%s bytes)\n' || true
+
+          echo "===== NATIVE REPORT ====="
+          cat dist/native-report.txt || true
+
+      - name: Upload FNA build and inspection artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FNA-18.5-build-and-inspection
+          path: dist/
+          if-no-files-found: warn
