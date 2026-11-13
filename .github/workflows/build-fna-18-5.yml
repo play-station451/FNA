@@ -1,0 +1,138 @@
+
+name: Build FNA 18.5 Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "vendor/FNA-1805.zip"
+      - ".github/workflows/build-fna-18-5.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-fna:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mono-devel make unzip git
+
+      - name: Prepare directories
+        shell: bash
+        run: |
+          mkdir -p work dist/FNA-18.5-x64
+
+      - name: Check source archive
+        shell: bash
+        run: |
+          test -f vendor/FNA-1805.zip
+          unzip -l vendor/FNA-1805.zip | grep -E 'FNA/Makefile'
+
+      - name: Extract FNA source
+        shell: bash
+        run: |
+          unzip -q vendor/FNA-1805.zip -d work/fna-source
+          test -f work/fna-source/FNA/Makefile
+
+      - name: Build managed FNA.dll
+        shell: bash
+        run: |
+          cd work/fna-source/FNA
+          make release
+          find bin -type f -iname 'FNA.dll' -print
+
+      - name: Collect managed FNA files
+        shell: bash
+        run: |
+          FNA_DIR="work/fna-source/FNA"
+          OUTPUT="dist/FNA-18.5-x64"
+
+          FNA_DLL="$(find "$FNA_DIR/bin" -type f -iname 'FNA.dll' | head -n 1)"
+
+          if [ -z "$FNA_DLL" ]; then
+            echo "FNA.dll was not produced."
+            exit 1
+          fi
+
+          cp "$FNA_DLL" "$OUTPUT/FNA.dll"
+          cp "$FNA_DIR/FNA.dll.config" "$OUTPUT/FNA.dll.config"
+
+      - name: Retrieve legacy native libraries
+        shell: bash
+        run: |
+          git clone --depth 1 \
+            https://github.com/danielcrenna/fnalibs.git \
+            work/legacy-fnalibs
+
+          NATIVE="work/legacy-fnalibs/fnalibs/x64"
+          OUTPUT="dist/FNA-18.5-x64"
+
+          if [ ! -d "$NATIVE" ]; then
+            echo "Legacy x64 native library folder not found."
+            find work/legacy-fnalibs -maxdepth 4 -type f
+            exit 1
+          fi
+
+          cp -av "$NATIVE/." "$OUTPUT/"
+
+      - name: Verify required native libraries
+        shell: bash
+        run: |
+          OUTPUT="dist/FNA-18.5-x64"
+
+          REQUIRED=(
+            SDL2.dll
+            SDL2_image.dll
+            soft_oal.dll
+            MojoShader.dll
+            libvorbisfile.dll
+            libtheorafile.dll
+          )
+
+          FAILED=0
+
+          for DLL in "${REQUIRED[@]}"; do
+            if [ -f "$OUTPUT/$DLL" ]; then
+              echo "FOUND: $DLL"
+            else
+              echo "MISSING: $DLL"
+              FAILED=1
+            fi
+          done
+
+          echo "$FAILED" > dist/verification-status.txt
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "One or more native dependencies are missing."
+            exit 1
+          fi
+
+      - name: Generate build report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p dist/FNA-18.5-x64
+
+          {
+            echo "FNA 18.5 Windows x64 build"
+            echo "Build date: $(date -u)"
+            echo ""
+            echo "Files:"
+            find dist/FNA-18.5-x64 -maxdepth 1 -type f -printf '%f (%s bytes)\n'
+          } > dist/BUILD-REPORT.txt
+
+      - name: Upload FNA artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FNA-18.5-Windows-x64
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 14
